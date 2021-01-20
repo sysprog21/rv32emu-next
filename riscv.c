@@ -1,5 +1,6 @@
 #include <assert.h>
 #include <stdbool.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -21,7 +22,7 @@ static void rv_except_inst_misaligned(struct riscv_t *rv, uint32_t old_pc)
         rv->PC = base;
         break;
     case 1:  // VECTORED
-        rv->PC = base + 4 * code;
+        rv->PC = base + rv->inst_len * code;
         break;
     }
 
@@ -43,7 +44,7 @@ static void rv_except_load_misaligned(struct riscv_t *rv, uint32_t addr)
         rv->PC = base;
         break;
     case 1:  // VECTORED
-        rv->PC = base + 4 * code;
+        rv->PC = base + rv->inst_len * code;
         break;
     }
 
@@ -65,7 +66,7 @@ static void rv_except_store_misaligned(struct riscv_t *rv, uint32_t addr)
         rv->PC = base;
         break;
     case 1:  // VECTORED
-        rv->PC = base + 4 * code;
+        rv->PC = base + rv->inst_len * code;
         break;
     }
 
@@ -123,7 +124,7 @@ static bool op_load(struct riscv_t *rv, uint32_t inst UNUSED)
         return false;
     }
     // step over instruction
-    rv->PC += 4;
+    rv->PC += rv->inst_len;
     // enforce zero register
     if (rd == rv_reg_zero)
         rv->X[rv_reg_zero] = 0;
@@ -187,7 +188,7 @@ static bool op_op_imm(struct riscv_t *rv, uint32_t inst)
     }
 
     // step over instruction
-    rv->PC += 4;
+    rv->PC += rv->inst_len;
 
     // enforce zero register
     if (rd == rv_reg_zero)
@@ -204,7 +205,7 @@ static bool op_auipc(struct riscv_t *rv, uint32_t inst)
     rv->X[rd] = val;
 
     // step over instruction
-    rv->PC += 4;
+    rv->PC += rv->inst_len;
 
     // enforce zero register
     if (rd == rv_reg_zero)
@@ -249,7 +250,7 @@ static bool op_store(struct riscv_t *rv, uint32_t inst)
     }
 
     // step over instruction
-    rv->PC += 4;
+    rv->PC += rv->inst_len;
     return true;
 }
 
@@ -380,7 +381,7 @@ static bool op_op(struct riscv_t *rv, uint32_t inst)
         return false;
     }
     // step over instruction
-    rv->PC += 4;
+    rv->PC += rv->inst_len;
     // enforce zero register
     if (rd == rv_reg_zero)
         rv->X[rv_reg_zero] = 0;
@@ -395,7 +396,7 @@ static bool op_lui(struct riscv_t *rv, uint32_t inst)
     rv->X[rd] = val;
 
     // step over instruction
-    rv->PC += 4;
+    rv->PC += rv->inst_len;
 
     // enforce zero register
     if (rd == rv_reg_zero)
@@ -446,7 +447,7 @@ static bool op_branch(struct riscv_t *rv, uint32_t inst)
             rv_except_inst_misaligned(rv, pc);
     } else {
         // step over instruction
-        rv->PC += 4;
+        rv->PC += rv->inst_len;
     }
     // can branch
     return false;
@@ -462,7 +463,7 @@ static bool op_jalr(struct riscv_t *rv, uint32_t inst)
     const int32_t imm = dec_itype_imm(inst);
 
     // compute return address
-    const uint32_t ra = rv->PC + 4;
+    const uint32_t ra = rv->PC + rv->inst_len;
 
     // jump
     rv->PC = (rv->X[rs1] + imm) & ~1u;
@@ -488,7 +489,7 @@ static bool op_jal(struct riscv_t *rv, uint32_t inst)
     const int32_t rel = dec_jtype_imm(inst);
 
     // compute return address
-    const uint32_t ra = rv->PC + 4;
+    const uint32_t ra = rv->PC + rv->inst_len;
     rv->PC += rel;
 
     // link
@@ -654,7 +655,7 @@ static bool op_system(struct riscv_t *rv, uint32_t inst)
     }
 
     // step over instruction
-    rv->PC += 4;
+    rv->PC += rv->inst_len;
 
     // enforce zero register
     if (rd == rv_reg_zero)
@@ -770,8 +771,434 @@ static bool op_amo(struct riscv_t *rv, uint32_t inst)
 #define op_nmsub NULL
 #define op_nmadd NULL
 
+#ifdef ENABLE_RV32C
+static bool c_op_addi(struct riscv_t *rv, uint16_t inst)
+{
+    uint16_t tmp =
+        (uint16_t)(((inst & FCI_IMM_12) >> 5) | (inst & FCI_IMM_6_2)) >> 2;
+    const int32_t imm = (0x20 & tmp) ? 0xffffffc0 | tmp : tmp;
+    const uint16_t rd = c_dec_rd(inst);
+
+    // dispatch operation type
+    if (rd != 0) {
+        // C.ADDI
+        rv->X[rd] += imm;
+    } else {
+        // C.NOP
+    }
+
+    // step over instruction
+    rv->PC += rv->inst_len;
+    // enforce zero register
+    if (rd == rv_reg_zero)
+        rv->X[rv_reg_zero] = 0;
+    return true;
+}
+
+static bool c_op_addi4spn(struct riscv_t *rv, uint16_t inst)
+{
+    uint16_t temp = 0;
+    temp |= (inst & 0x1800) >> 7;
+    temp |= (inst & 0x780) >> 1;
+    temp |= (inst & 0x40) >> 4;
+    temp |= (inst & 0x20) >> 2;
+
+    const uint16_t imm = temp;
+    const uint16_t rd = c_dec_rdc(inst) | 0x08;
+    rv->X[rd] = rv->X[2] + imm;
+
+    rv->PC += rv->inst_len;
+    return true;
+}
+
+static bool c_op_li(struct riscv_t *rv, uint16_t inst)
+{
+    uint16_t tmp = (uint16_t)((inst & 0x1000) >> 7 | (inst & 0x7c) >> 2);
+    const int32_t imm = (tmp & 0x20) ? 0xffffffc0 | tmp : tmp;
+    const uint16_t rd = c_dec_rd(inst);
+    rv->X[rd] = imm;
+
+    rv->PC += rv->inst_len;
+    return true;
+}
+
+static bool c_op_lui(struct riscv_t *rv, uint16_t inst)
+{
+    const uint16_t rd = c_dec_rd(inst);
+    if (rd == 2) {
+        // C.ADDI16SP
+        uint32_t tmp = (inst & 0x1000) >> 3;
+        tmp |= (inst & 0x40);
+        tmp |= (inst & 0x20) << 1;
+        tmp |= (inst & 0x18) << 4;
+        tmp |= (inst & 0x4) << 3;
+        const int32_t imm = (tmp & 0x200) ? 0xfffffc | tmp : tmp;
+        if (imm == 0)
+            assert(!"Should not be zero.");
+        rv->X[rd] += imm;
+    } else if (rd != 0) {
+        // C.LUI
+        uint32_t tmp = (inst & 0x1000) << 5 | (inst & 0x7c) << 12;
+        const int32_t imm = (tmp & 0x20000) ? 0xfffc0000 | tmp : tmp;
+        if (imm == 0)
+            assert(!"Should not be zero.");
+        rv->X[rd] = imm;
+    } else {
+        assert(!"Should be unreachbale.");
+    }
+
+    rv->PC += rv->inst_len;
+    return true;
+}
+
+static bool c_op_srli(struct riscv_t *rv, uint16_t inst)
+{
+    uint32_t temp = 0;
+    temp |= (inst & 0x1000) >> 7;
+    temp |= (inst & 0x007C) >> 2;
+
+    const uint32_t shamt = temp;
+    const uint32_t rs1 = c_dec_rs1c(inst) | 0x08;
+
+    if (shamt & 0x10) {
+        assert(!"shamt[5]=1 Reserved");
+        return false;
+    }
+
+    rv->X[rs1] >>= shamt;
+
+    return true;
+}
+
+static bool c_op_srai(struct riscv_t *rv, uint16_t inst)
+{
+    uint32_t temp = 0;
+    temp |= (inst & 0x1000) >> 7;
+    temp |= (inst & 0x007C) >> 2;
+
+    const uint32_t shamt = temp;
+    const uint32_t rs1 = c_dec_rs1c(inst) | 0x08;
+
+    if (shamt & 0x10) {
+        assert(!"shamt[5]=1 Reserved");
+        return false;
+    }
+
+    const uint32_t mask = 0x80000000 | rv->X[rs1];
+    rv->X[rs1] >>= shamt;
+
+    for (unsigned int i = 0; i < shamt; ++i) {
+        rv->X[rs1] |= mask >> i;
+    }
+
+    return true;
+}
+
+static bool c_op_andi(struct riscv_t *rv, uint16_t inst)
+{
+    const uint16_t mask = (0x1000 & inst) << 3;
+
+    uint16_t temp = 0;
+    for (int i = 0; i < 10; ++i) {
+        temp |= (mask >> i);
+    }
+    temp |= (inst & 0x007C) >> 2;
+
+    const uint32_t imm = sign_extend_h(temp);
+    const uint32_t rs1 = c_dec_rs1c(inst) | 0x08;
+
+    rv->X[rs1] &= imm;
+
+    return true;
+}
+
+// static bool c_op_XX(struct riscv_t *rv, uint16_t inst)
+static bool c_op_misc_alu(struct riscv_t *rv, uint16_t inst)
+{
+    bool exec_result;
+
+    // Find actual instruction
+    switch ((inst & 0x0C00) >> 10) {
+    case 0:  // C.SRLI
+        exec_result = c_op_srli(rv, inst);
+        break;
+    case 1:  // C.SRAI
+        exec_result = c_op_srai(rv, inst);
+        break;
+    case 2:  // C.ANDI
+        exec_result = c_op_andi(rv, inst);
+        break;
+    case 3:;  // Arithmistic
+        uint32_t temp = 0;
+        temp |= (inst & 0x1000) >> 10;
+        temp |= (inst & 0x0060) >> 5;
+
+        const uint32_t funct = temp;
+        const uint32_t rs1 = c_dec_rs1c(inst) | 0x08;
+        const uint32_t rs2 = c_dec_rs2c(inst) | 0x08;
+        const uint32_t rd = rs1;
+
+        switch (funct) {
+        case 0:  // SUB
+            rv->X[rd] = rv->X[rs1] - rv->X[rs2];
+            break;
+        case 1:  // XOR
+            rv->X[rd] = rv->X[rs1] ^ rv->X[rs2];
+            break;
+        case 2:  // OR
+            rv->X[rd] = rv->X[rs1] | rv->X[rs2];
+            break;
+        case 3:  // AND
+            rv->X[rd] = rv->X[rs1] & rv->X[rs2];
+            break;
+        case 4:
+            assert(!"RV64/128C instructions");
+            break;
+        case 5:
+            assert(!"RV64/128C instructions");
+            break;
+        case 6:
+        case 7:
+            assert(!"Instruction preserved");
+            break;
+        default:
+            assert(!"Should not be reachable");
+            break;
+        }
+        break;
+    default:
+        assert(!"Should not be reachable");
+        break;
+    }
+
+    if (!exec_result) {
+        return false;
+    }
+
+    rv->PC += rv->inst_len;
+    return true;
+}
+
+static bool c_op_slli(struct riscv_t *rv, uint16_t inst)
+{
+    uint32_t temp = 0;
+    temp |= (inst & FCI_IMM_12) >> 7;
+    temp |= (inst & FCI_IMM_6_2) >> 2;
+
+    const uint32_t shamt = temp;
+    const uint32_t rd = c_dec_rd(inst);
+
+    if (rd) {
+        rv->X[rd] <<= shamt;
+    }
+
+    rv->PC += rv->inst_len;
+    return true;
+}
+
+// CI-type
+static bool c_op_lwsp(struct riscv_t *rv, uint16_t inst)
+{
+    uint16_t temp = 0;
+    temp |= ((inst & FCI_IMM_6_2) | 0b1110000) >> 2;
+    temp |= (inst & FCI_IMM_12) >> 7;
+    temp |= ((inst & FCI_IMM_6_2) | 0b0001100) << 4;
+
+    const uint16_t imm = temp;
+    const uint16_t rd = c_dec_rd(inst);
+    const uint16_t addr = rv->X[2] + imm;
+
+    if (addr & 3) {
+        rv_except_load_misaligned(rv, addr);
+        return false;
+    }
+    rv->X[rd] = rv->io.mem_read_w(rv, addr);
+
+    rv->PC += rv->inst_len;
+    return true;
+}
+
+// CSS-type
+static bool c_op_swsp(struct riscv_t *rv, uint16_t inst)
+{
+    const uint16_t imm = (inst & 0x1e00) >> 7 | (inst & 0x180) >> 1;
+    const uint16_t rs2 = c_dec_rs2(inst);
+    const uint32_t addr = rv->X[2] + imm;
+    const uint32_t data = rv->X[rs2];
+
+    if (addr & 3) {
+        rv_except_store_misaligned(rv, addr);
+        return false;
+    }
+    rv->io.mem_write_w(rv, addr, data);
+
+    rv->PC += rv->inst_len;
+    return true;
+}
+
+// CL-type
+static bool c_op_lw(struct riscv_t *rv, uint16_t inst)
+{
+    uint16_t temp = 0;
+    temp |= (inst & 0b0000000001000000) >> 4;
+    temp |= (inst & FC_IMM_12_10) >> 7;
+    temp |= (inst & 0b0000000000100000) << 1;
+
+    const uint16_t imm = temp;
+    const uint16_t rd = c_dec_rdc(inst) | 0x08;
+    const uint16_t rs1 = c_dec_rs1c(inst) | 0x08;
+    const uint32_t addr = rv->X[rs1] + imm;
+
+    if (addr & 3) {
+        rv_except_load_misaligned(rv, addr);
+        return false;
+    }
+    rv->X[rd] = rv->io.mem_read_w(rv, addr);
+
+    rv->PC += rv->inst_len;
+    return true;
+}
+
+// CS-type
+static bool c_op_sw(struct riscv_t *rv, uint16_t inst)
+{
+    uint32_t temp = 0;
+    //                ....xxxx....xxxx
+    temp |= (inst & 0b0000000001000000) >> 4;
+    temp |= (inst & FC_IMM_12_10) >> 7;
+    temp |= (inst & 0b0000000000100000) << 1;
+
+    const uint32_t imm = temp;
+    const uint32_t rs1 = c_dec_rs1c(inst) | 0x08;
+    const uint32_t rs2 = c_dec_rs2c(inst) | 0x08;
+    const uint32_t addr = rv->X[rs1] + imm;
+    const uint32_t data = rv->X[rs2];
+
+    if (addr & 3) {
+        rv_except_store_misaligned(rv, addr);
+        return false;
+    }
+    rv->io.mem_write_w(rv, addr, data);
+
+    rv->PC += rv->inst_len;
+    return true;
+}
+
+// CJ-type
+static bool c_op_j(struct riscv_t *rv, uint16_t inst)
+{
+    const uint32_t imm = sign_extend_h(c_dec_cjtype_imm(inst));
+    rv->PC += imm;
+    // can branch
+    return false;
+}
+
+static bool c_op_jal(struct riscv_t *rv, uint16_t inst)
+{
+    const uint32_t imm = sign_extend_h(c_dec_cjtype_imm(inst));
+    rv->X[1] = rv->PC + 2;
+    rv->PC += imm;
+    // can branch
+    return false;
+}
+
+// CR-type
+static bool c_op_cr(struct riscv_t *rv, uint16_t inst)
+{
+    const uint32_t rs1 = c_dec_rs1(inst);
+    const uint32_t rs2 = c_dec_rs2(inst);
+    const uint32_t rd = rs1;
+
+    switch ((inst & 0x1000) >> 12) {
+    case 0:
+        if (rs2) {
+            // C.MV
+            rv->X[rd] = rv->X[rs2];
+            rv->PC += rv->inst_len;
+        } else {
+            // C.JR
+            rv->PC = rv->X[rs1];
+            return false;
+        }
+        break;
+    case 1:
+        if (rs1) {
+            if (rs2) {
+                // C.ADD
+                rv->X[rd] = rv->X[rs1] + rv->X[rs2];
+                rv->PC += rv->inst_len;
+            } else {
+                // C.JALR
+                rv->X[1] = rv->PC + 2;
+                rv->PC = rv->X[rs1];
+                if (rv->PC & 1) {
+                    rv_except_inst_misaligned(rv, rv->PC);
+                    return false;
+                }
+                // can branch
+                return false;
+            }
+        } else {
+            // C.EBREAK
+            rv->io.on_ebreak(rv);
+        }
+        break;
+    default:
+        assert(!"Should be unreachbale.");
+        break;
+    }
+    return true;
+}
+
+// CB-type
+static bool c_op_beqz(struct riscv_t *rv, uint16_t inst)
+{
+    const uint32_t imm = sign_extend_h(c_dec_cbtype_imm(inst));
+    const uint32_t rs1 = c_dec_rs1c(inst) | 0x08;
+    rv->PC += (!rv->X[rs1]) ? imm : rv->inst_len;
+    // can branch
+    return false;
+}
+
+static bool c_op_bnez(struct riscv_t *rv, uint16_t inst)
+{
+    const uint32_t imm = sign_extend_h(c_dec_cbtype_imm(inst));
+    const uint32_t rs1 = c_dec_rs1c(inst) | 0x08;
+    rv->PC += (rv->X[rs1]) ? imm : rv->inst_len;
+    // can branch
+    return false;
+}
+#else
+#define c_op_addi4spn NULL
+#define c_op_addi NULL
+#define c_op_swsp NULL
+#define c_op_li NULL
+#define c_op_slli NULL
+#define c_op_jal NULL
+#define c_op_lw NULL
+#define c_op_lwsp NULL
+#define c_op_lui NULL
+#define c_op_misc_alu NULL
+#define c_op_jalr NULL
+#define c_op_j NULL
+#define c_op_beqz NULL
+#define c_op_bnez NULL
+#define c_op_sw NULL
+#endif  // ENABLE_RV32C
+
+/* No RV32C.F support */
+#define c_op_fldsp NULL
+#define c_op_flwsp NULL
+#define c_op_fswsp NULL
+#define c_op_fsdsp NULL
+#define c_op_fld NULL
+#define c_op_flw NULL
+#define c_op_fsw NULL
+#define c_op_fsd NULL
+
 // opcode handler type
 typedef bool (*opcode_t)(struct riscv_t *rv, uint32_t inst);
+typedef bool (*c_opcode_t)(struct riscv_t *rv, uint16_t inst);
 
 // clang-format off
 // opcode dispatch table
@@ -781,6 +1208,19 @@ static const opcode_t opcodes[] = {
     op_store,  op_store_fp, NULL,     op_amo,      op_op,     op_lui,   NULL, NULL, // 01
     op_madd,   op_msub,     op_nmsub, op_nmadd,    op_fp,     NULL,     NULL, NULL, // 10
     op_branch, op_jalr,     NULL,     op_jal,      op_system, NULL,     NULL, NULL, // 11
+};
+
+// compressed opcode dispatch table
+static const c_opcode_t c_opcodes[] = {
+//  00              01              10          11         
+    c_op_addi4spn,  c_op_addi,      c_op_slli,  NULL, // 000
+    c_op_fld,       c_op_jal,       c_op_fldsp, NULL, // 001
+    c_op_lw,        c_op_li,        c_op_lwsp,  NULL, // 010
+    c_op_flw,       c_op_lui,       c_op_flwsp, NULL, // 011
+    NULL,           c_op_misc_alu,  c_op_cr,    NULL, // 100
+    c_op_fsd,       c_op_j,         c_op_fsdsp, NULL, // 101
+    c_op_sw,        c_op_beqz,      c_op_swsp,  NULL, // 110
+    c_op_fsw,       c_op_bnez,      c_op_fswsp, NULL, // 111
 };
 // clang-format on
 
@@ -793,21 +1233,34 @@ void rv_step(struct riscv_t *rv, int32_t cycles)
         // fetch the next instruction
         const uint32_t inst = rv->io.mem_ifetch(rv, rv->PC);
 
+        // Illegal instruction if inst[15:0] == 0
+        assert(inst & 0xFFFF && "inst[15:0] must not be all 0.\n");
+
         // standard uncompressed instruction
         if ((inst & 3) == 3) {
             const uint32_t index = (inst & INST_6_2) >> 2;
 
-	    // dispatch this opcode
+            // dispatch this opcode
             const opcode_t op = opcodes[index];
             assert(op);
+            rv->inst_len = INST_32;
             if (!op(rv, inst))
                 break;
 
             // increment the cycles csr
             rv->csr_cycle++;
         } else {
-            // TODO: compressed instruction
-            assert(!"Unreachable");
+            const uint16_t c_index =
+                (inst & FC_FUNC3) >> 11 | (inst & FC_OPCODE);
+            const c_opcode_t op = c_opcodes[c_index];
+
+            assert(op);
+            rv->inst_len = INST_16;
+            if (!op(rv, inst))
+                break;
+
+            // increment the cycles csr
+            rv->csr_cycle++;
         }
     }
 }
@@ -891,6 +1344,7 @@ void rv_reset(struct riscv_t *rv, riscv_word_t pc)
 
     // set the reset address
     rv->PC = pc;
+    rv->inst_len = INST_UNKNOWN;
 
     // set the default stack pointer
     rv->X[rv_reg_sp] = DEFAULT_STACK_ADDR;

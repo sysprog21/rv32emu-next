@@ -2,3 +2,5 @@ build/DOOM1.WAD*
 build/rv32emu
 *.o
 *.o.d
+tests/
+.vscode
