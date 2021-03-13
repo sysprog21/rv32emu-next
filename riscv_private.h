@@ -82,6 +82,10 @@ enum {
 
 struct riscv_t {
     bool halt;
+    // length in byte of current instruction
+    uint8_t inst_length;
+    // instruction buffer
+    uint32_t inst_buffer;
 
     // io interface
     struct riscv_io_t io;
