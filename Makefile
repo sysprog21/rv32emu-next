@@ -75,6 +75,22 @@ check: $(BIN)
 	(cd $(OUT); ../$(BIN) hello.elf)
 	(cd $(OUT); ../$(BIN) puzzle.elf)
 
+# variables for compliance
+COMPLIANCE_DIR ?= ./riscv-compliance
+export RISCV_PREFIX ?= riscv32-unknown-elf-
+export RISCV_TARGET = compliance-target
+export TARGETDIR = $(shell pwd)
+export XLEN = 32
+export JOBS ?= -j
+export WORK = $(TARGETDIR)/build/compliance
+
+$(COMPLIANCE_DIR):
+	git submodule update --init
+
+compliance: $(BIN) $(COMPLIANCE_DIR)
+	$(Q)$(MAKE) --quiet -C $(COMPLIANCE_DIR) clean;
+	$(Q)$(MAKE) --quiet -C $(COMPLIANCE_DIR);
+		
 demo: $(BIN) $(OUT)/DOOM1.WAD
 	(cd $(OUT); ../$(BIN) doom.elf)
 
